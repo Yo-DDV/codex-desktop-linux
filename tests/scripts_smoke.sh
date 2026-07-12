@@ -1717,6 +1717,46 @@ SCRIPT
     [ -z "$second_line" ] || fail "Expected make build-app default DMG argument to be empty so install.sh falls back to reuse/download, got: $(cat "$install_log")"
 }
 
+test_make_update_omits_empty_dmg_argument() {
+    info "Checking make update optional DMG forwarding"
+    local workspace="$TMP_DIR/make-update-dmg"
+    local rebuild_log="$workspace/rebuild-args.log"
+    local explicit_dmg="$workspace/Codex test.dmg"
+
+    mkdir -p "$workspace/scripts"
+    printf '%s' "dmg" > "$explicit_dmg"
+    cat > "$workspace/scripts/rebuild-candidate.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+set -eu
+{
+    printf 'CALL:'
+    for arg in "$@"; do
+        printf '<%s>' "$arg"
+    done
+    printf '\n'
+} >> "$TEST_REBUILD_LOG"
+SCRIPT
+    chmod +x "$workspace/scripts/rebuild-candidate.sh"
+
+    TEST_REBUILD_LOG="$rebuild_log" \
+        make -f "$REPO_DIR/Makefile" -C "$workspace" rebuild >/dev/null
+    TEST_REBUILD_LOG="$rebuild_log" \
+        make -f "$REPO_DIR/Makefile" -C "$workspace" update >/dev/null
+    TEST_REBUILD_LOG="$rebuild_log" \
+        make -f "$REPO_DIR/Makefile" -C "$workspace" rebuild DMG="$explicit_dmg" >/dev/null
+    TEST_REBUILD_LOG="$rebuild_log" \
+        make -f "$REPO_DIR/Makefile" -C "$workspace" update DMG="$explicit_dmg" >/dev/null
+
+    [ "$(sed -n '1p' "$rebuild_log")" = "CALL:" ] \
+        || fail "Default make rebuild should omit the optional DMG argument: $(cat "$rebuild_log")"
+    [ "$(sed -n '2p' "$rebuild_log")" = "CALL:<--install>" ] \
+        || fail "Default make update should omit the optional DMG argument: $(cat "$rebuild_log")"
+    [ "$(sed -n '3p' "$rebuild_log")" = "CALL:<$explicit_dmg>" ] \
+        || fail "Explicit make rebuild should preserve the complete DMG path: $(cat "$rebuild_log")"
+    [ "$(sed -n '4p' "$rebuild_log")" = "CALL:<--install><$explicit_dmg>" ] \
+        || fail "Explicit make update should preserve the complete DMG path: $(cat "$rebuild_log")"
+}
+
 test_make_build_app_fresh_uses_installer_fresh_flow() {
     info "Checking make build-app-fresh DMG behavior"
     local workspace="$TMP_DIR/make-build-app-fresh"
@@ -9317,6 +9357,7 @@ main() {
     test_make_install_reports_missing_native_packages
     test_make_run_app_reports_missing_launcher
     test_make_build_app_uses_installer_download_flow_by_default
+    test_make_update_omits_empty_dmg_argument
     test_make_build_app_fresh_uses_installer_fresh_flow
     test_make_build_dev_app_writes_host_portable_launcher_symlink
     test_installer_refreshes_stale_cached_dmg_metadata
