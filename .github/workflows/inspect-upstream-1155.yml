@@ -1,0 +1,180 @@
+name: Inspect upstream patch drift 1155
+
+on:
+  push:
+    branches:
+      - agent/inspect-1155-current-upstream
+  pull_request:
+    branches:
+      - ci/issue-1155-base
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+
+      - name: Download and verify current upstream DMG
+        env:
+          UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
+          UPSTREAM_DMG_SHA256: ae864e2def7db56d0bb77a876a5cbe4e4c2f554ccc654cec921b946892583c0a
+        run: |
+          curl --fail --location --retry 3 --retry-delay 2 \
+            --output "$RUNNER_TEMP/ChatGPT.dmg" "$UPSTREAM_DMG_URL"
+          printf '%s  %s\n' "$UPSTREAM_DMG_SHA256" "$RUNNER_TEMP/ChatGPT.dmg" | sha256sum --check --strict
+
+      - name: Extract app.asar
+        run: |
+          mkdir -p "$RUNNER_TEMP/dmg" "$RUNNER_TEMP/app-extracted"
+          set +e
+          7z x -y -snl -o"$RUNNER_TEMP/dmg" "$RUNNER_TEMP/ChatGPT.dmg" >"$RUNNER_TEMP/7z.log" 2>&1
+          SEVEN_ZIP_STATUS=$?
+          set -e
+
+          APP_DIR="$(find "$RUNNER_TEMP/dmg" -maxdepth 3 -name '*.app' -type d -print -quit)"
+          if [ -z "$APP_DIR" ]; then
+            cat "$RUNNER_TEMP/7z.log" >&2
+            exit 1
+          fi
+          if [ "$SEVEN_ZIP_STATUS" -ne 0 ]; then
+            echo "7z exited with code $SEVEN_ZIP_STATUS after extracting the app bundle; continuing as the project extractor does."
+            tail -n 8 "$RUNNER_TEMP/7z.log" || true
+          fi
+
+          APP_ASAR="$APP_DIR/Contents/Resources/app.asar"
+          test -f "$APP_ASAR"
+          npx --yes asar extract "$APP_ASAR" "$RUNNER_TEMP/app-extracted"
+
+      - name: Probe current semantic contracts
+        run: |
+          node - "$RUNNER_TEMP/app-extracted" <<'NODE' >"$RUNNER_TEMP/probe.json"
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = process.argv[2];
+          const files = [];
+          const walk = (dir) => {
+            if (!fs.existsSync(dir)) return;
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) walk(full);
+              else if (entry.isFile() && entry.name.endsWith('.js')) files.push(full);
+            }
+          };
+          walk(path.join(root, '.vite', 'build'));
+          walk(path.join(root, 'webview', 'assets'));
+
+          const entries = files.map((file) => ({
+            file,
+            name: path.basename(file),
+            source: fs.readFileSync(file, 'utf8'),
+          }));
+          const count = (source, regex) => Array.from(source.matchAll(regex)).length;
+          const names = (predicate) => entries.filter(predicate).map(({ name }) => name).sort();
+          const sum = (regex) => entries.reduce((total, { source }) => total + count(source, regex), 0);
+
+          const trayOwners = entries.filter(({ source }) =>
+            source.includes('systemQuitMenuItemLabel') || source.includes('getNativeTrayMenuItems(){'));
+          const trayLabelWindows = [];
+          for (const { source } of trayOwners) {
+            let offset = 0;
+            while ((offset = source.indexOf('systemQuitMenuItemLabel', offset)) !== -1) {
+              trayLabelWindows.push(source.slice(offset, offset + 900));
+              offset += 1;
+            }
+          }
+          const windowCount = (predicate) => trayLabelWindows.filter(predicate).length;
+
+          const oldSourceShape = /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return`subAgent`in \2\?\2\.subAgent:null\}function ([A-Za-z_$][\w$]*)\(/gu;
+          const patchedSourceShape = /`subAgent`in ([A-Za-z_$][\w$]*)\?\1\.subAgent:`subagent`in \1\?\1\.subagent:null/gu;
+          const oldNicknameShape = /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return \2==null\?null:([A-Za-z_$][\w$]*)\(\2\.agentNickname\)\?\?\3\(([A-Za-z_$][\w$]*)\(\2\.source\)\?\.agentNickname\)\}/gu;
+          const patchedNicknameShape = /([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.agentNickname\)\?\?\1\(\2\.agent_nickname\)\?\?\1\([A-Za-z_$][\w$]*\(\2\.source\)\?\.agentNickname\)/gu;
+
+          console.log(JSON.stringify({
+            javascriptFiles: entries.length,
+            tray: {
+              ownerFiles: trayOwners.map(({ name }) => name).sort(),
+              getNativeTrayMenuItemsFiles: names(({ source }) => source.includes('getNativeTrayMenuItems(){')),
+              systemQuitLabelOccurrences: sum(/systemQuitMenuItemLabel/gu),
+              legacyDirectHandlerMatches: sum(/\{label:this\.systemQuitMenuItemLabel,click:\(\)=>\{[A-Za-z_$][\w$]*\.app\.quit\(\)\}\}/gu),
+              labelWindowsWithClickArrow: windowCount((source) => source.includes('click:()=>')),
+              labelWindowsWithDirectAppQuit: windowCount((source) => /[A-Za-z_$][\w$]*\.app\.quit\(\)/u.test(source)),
+              labelWindowsWithQuitMethodCall: windowCount((source) => /(?:this\.)?[A-Za-z_$][\w$]*quit[A-Za-z_$\w]*\(/iu.test(source)),
+              labelWindowsWithExplicitQuitMarker: windowCount((source) => source.includes('codexLinuxPrepareForExplicitQuit') || source.includes('codexLinuxMarkQuitInProgress')),
+            },
+            fastMode: {
+              candidateFiles: names(({ source }) => source.includes('serviceTiers') || source.includes('additionalSpeedTiers')),
+              serviceTiersOccurrences: sum(/serviceTiers/gu),
+              additionalSpeedTiersOccurrences: sum(/additionalSpeedTiers/gu),
+              unsafeServiceTierDereferences: sum(/[A-Za-z_$][\w$]*\.serviceTiers\.length\s*>\s*0/gu),
+              guardedServiceTierDereferences: sum(/\?\.serviceTiers\?\.length/gu),
+            },
+            subagent: {
+              candidateFiles: names(({ source }) => source.includes('thread_spawn') || source.includes('agent_nickname')),
+              threadSpawnOccurrences: sum(/thread_spawn/gu),
+              subAgentOccurrences: sum(/subAgent/gu),
+              lowercaseSubagentOccurrences: sum(/subagent/gu),
+              agentNicknameOccurrences: sum(/agentNickname/gu),
+              snakeNicknameOccurrences: sum(/agent_nickname/gu),
+              oldSourceShapeMatches: sum(oldSourceShape),
+              patchedSourceShapeMatches: sum(patchedSourceShape),
+              oldNicknameShapeMatches: sum(oldNicknameShape),
+              patchedNicknameShapeMatches: sum(patchedNicknameShape),
+            },
+          }, null, 2));
+          NODE
+          cat "$RUNNER_TEMP/probe.json"
+
+      - name: Run required patch contract
+        id: patch
+        continue-on-error: true
+        run: |
+          node scripts/patch-linux-window-ui.js \
+            --report-json "$RUNNER_TEMP/patch-report.json" \
+            --enforce-critical \
+            "$RUNNER_TEMP/app-extracted"
+
+      - name: Report required patch statuses
+        if: always()
+        run: |
+          node - "$RUNNER_TEMP/patch-report.json" <<'NODE'
+          const fs = require('node:fs');
+          const reportPath = process.argv[2];
+          if (!fs.existsSync(reportPath)) {
+            console.error('patch-report.json was not produced');
+            process.exit(1);
+          }
+          const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+          const required = (report.patches ?? []).filter((entry) => entry.ciPolicy === 'required-upstream');
+          for (const entry of required) {
+            console.log(`${entry.name}: ${entry.status}${entry.reason ? ` (${entry.reason})` : ''}`);
+          }
+          const failures = required.filter((entry) => entry.status !== 'applied' && entry.status !== 'already-applied');
+          console.log(`required failures: ${failures.length}`);
+          if (failures.length > 0) process.exitCode = 1;
+          NODE
+
+      - name: Upload sanitized diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-1155-sanitized-diagnostics
+          path: |
+            ${{ runner.temp }}/probe.json
+            ${{ runner.temp }}/patch-report.json
+          if-no-files-found: error
+          retention-days: 1

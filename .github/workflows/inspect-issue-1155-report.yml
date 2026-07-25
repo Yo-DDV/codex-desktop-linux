@@ -1,0 +1,83 @@
+name: Inspect issue 1155 public diagnostics
+
+on:
+  push:
+    branches:
+      - agent/inspect-1155-current-upstream
+  pull_request:
+    branches:
+      - ci/issue-1155-base
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download public issue attachments
+        run: |
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/reporter-patch-report.json" \
+            https://github.com/user-attachments/files/30377607/patch-report.json
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/reporter-install.log" \
+            https://github.com/user-attachments/files/30377608/install.log
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/reporter-dmg-decision.json" \
+            https://github.com/user-attachments/files/30377609/upstream-dmg-decision.json
+
+      - name: Sanitize reporter diagnostics
+        run: |
+          node - "$RUNNER_TEMP" <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = process.argv[2];
+          const report = JSON.parse(fs.readFileSync(path.join(root, 'reporter-patch-report.json'), 'utf8'));
+          const decision = JSON.parse(fs.readFileSync(path.join(root, 'reporter-dmg-decision.json'), 'utf8'));
+          const names = new Set([
+            'linux-explicit-tray-quit',
+            'main-process-ui',
+            'linux-fast-mode-model-guard',
+            'subagent-nickname-metadata-shape',
+          ]);
+          const selected = (report.patches ?? []).filter((entry) => names.has(entry.name));
+          const sanitized = {
+            generatedAt: report.generatedAt ?? null,
+            targetBasename: report.target ? path.basename(report.target) : null,
+            mainBundle: report.mainBundle ?? null,
+            iconAsset: report.iconAsset ?? null,
+            desktopName: report.desktopName ?? null,
+            linuxTarget: report.linuxTarget ?? null,
+            enabledFeatures: report.enabledFeatures ?? [],
+            selectedPatches: selected,
+            postPatchIntegrity: report.postPatchIntegrity ?? null,
+            dmgDecision: {
+              verdict: decision.verdict ?? null,
+              blockers: decision.blockers ?? null,
+              warnings: decision.warnings ?? null,
+              upstream: decision.upstream ?? decision.dmg ?? null,
+            },
+          };
+          fs.writeFileSync(path.join(root, 'reporter-sanitized.json'), JSON.stringify(sanitized, null, 2) + '\n');
+          NODE
+
+          grep -Ei 'Extracting DMG|Found:|app\.asar|main bundle|linux-explicit-tray-quit|main-process-ui|linux-fast-mode-model-guard|subagent-nickname-metadata-shape|Could not find tray quit|Could not find fast-mode|Could not find subagent|patch summary|required core|7z exited|safe package symlink|wrapper|commit|revision|source|version|repository|checkout|git ' \
+            "$RUNNER_TEMP/reporter-install.log" >"$RUNNER_TEMP/reporter-install-filtered.log" || true
+
+          cat "$RUNNER_TEMP/reporter-sanitized.json"
+          cat "$RUNNER_TEMP/reporter-install-filtered.log"
+
+      - name: Upload reporter diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-1155-reporter-diagnostics
+          path: |
+            ${{ runner.temp }}/reporter-sanitized.json
+            ${{ runner.temp }}/reporter-install-filtered.log
+            ${{ runner.temp }}/reporter-patch-report.json
+            ${{ runner.temp }}/reporter-install.log
+            ${{ runner.temp }}/reporter-dmg-decision.json
+          if-no-files-found: error
+          retention-days: 1
