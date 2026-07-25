@@ -1,0 +1,73 @@
+name: Inspect upstream patch drift 1155
+
+on:
+  push:
+    branches:
+      - agent/inspect-1155-current-upstream
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+
+      - name: Download and verify current upstream DMG
+        env:
+          UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
+          UPSTREAM_DMG_SHA256: ae864e2def7db56d0bb77a876a5cbe4e4c2f554ccc654cec921b946892583c0a
+        run: |
+          curl --fail --location --retry 3 --retry-delay 2 \
+            --output "$RUNNER_TEMP/ChatGPT.dmg" "$UPSTREAM_DMG_URL"
+          printf '%s  %s\n' "$UPSTREAM_DMG_SHA256" "$RUNNER_TEMP/ChatGPT.dmg" | sha256sum --check --strict
+
+      - name: Extract app.asar
+        run: |
+          mkdir -p "$RUNNER_TEMP/dmg" "$RUNNER_TEMP/app-extracted"
+          7z x -y -o"$RUNNER_TEMP/dmg" "$RUNNER_TEMP/ChatGPT.dmg" >/dev/null
+          APP_ASAR="$(find "$RUNNER_TEMP/dmg" -type f -path '*/Contents/Resources/app.asar' -print -quit)"
+          test -n "$APP_ASAR"
+          npx --yes @electron/asar extract "$APP_ASAR" "$RUNNER_TEMP/app-extracted"
+
+      - name: Run required patch contract
+        id: patch
+        continue-on-error: true
+        run: |
+          node scripts/patch-linux-window-ui.js \
+            --report-json "$RUNNER_TEMP/patch-report.json" \
+            --enforce-critical \
+            "$RUNNER_TEMP/app-extracted"
+
+      - name: Report required patch statuses
+        if: always()
+        run: |
+          node - "$RUNNER_TEMP/patch-report.json" <<'NODE'
+          const fs = require('node:fs');
+          const path = process.argv[2];
+          if (!fs.existsSync(path)) {
+            console.error('patch-report.json was not produced');
+            process.exit(1);
+          }
+          const report = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const required = (report.patches ?? []).filter((entry) => entry.requiredUpstream === true);
+          for (const entry of required) {
+            console.log(`${entry.name}: ${entry.status}${entry.reason ? ` (${entry.reason})` : ''}`);
+          }
+          const failures = required.filter((entry) => entry.status !== 'applied' && entry.status !== 'already-applied');
+          console.log(`required failures: ${failures.length}`);
+          if (failures.length > 0) process.exitCode = 1;
+          NODE
