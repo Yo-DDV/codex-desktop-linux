@@ -63,18 +63,21 @@ jobs:
           fs.writeFileSync(path.join(root, 'reporter-sanitized.json'), JSON.stringify(sanitized, null, 2) + '\n');
           NODE
 
-          grep -E 'Extracting DMG|Found:|app\.asar|main bundle|linux-explicit-tray-quit|main-process-ui|linux-fast-mode-model-guard|subagent-nickname-metadata-shape|Could not find tray quit|Could not find fast-mode|Could not find subagent|patch summary|required core|7z exited|safe package symlink' \
+          grep -Ei 'Extracting DMG|Found:|app\.asar|main bundle|linux-explicit-tray-quit|main-process-ui|linux-fast-mode-model-guard|subagent-nickname-metadata-shape|Could not find tray quit|Could not find fast-mode|Could not find subagent|patch summary|required core|7z exited|safe package symlink|wrapper|commit|revision|source|version|repository|checkout|git ' \
             "$RUNNER_TEMP/reporter-install.log" >"$RUNNER_TEMP/reporter-install-filtered.log" || true
 
           cat "$RUNNER_TEMP/reporter-sanitized.json"
           cat "$RUNNER_TEMP/reporter-install-filtered.log"
 
-      - name: Upload sanitized reporter diagnostics
+      - name: Upload reporter diagnostics
         uses: actions/upload-artifact@v4
         with:
           name: issue-1155-reporter-diagnostics
           path: |
             ${{ runner.temp }}/reporter-sanitized.json
             ${{ runner.temp }}/reporter-install-filtered.log
+            ${{ runner.temp }}/reporter-patch-report.json
+            ${{ runner.temp }}/reporter-install.log
+            ${{ runner.temp }}/reporter-dmg-decision.json
           if-no-files-found: error
           retention-days: 1
