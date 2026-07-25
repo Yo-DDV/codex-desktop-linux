@@ -62,7 +62,7 @@ jobs:
 
       - name: Probe current semantic contracts
         run: |
-          node - "$RUNNER_TEMP/app-extracted" <<'NODE'
+          node - "$RUNNER_TEMP/app-extracted" <<'NODE' >"$RUNNER_TEMP/probe.json"
           const fs = require('node:fs');
           const path = require('node:path');
           const root = process.argv[2];
@@ -137,6 +137,7 @@ jobs:
             },
           }, null, 2));
           NODE
+          cat "$RUNNER_TEMP/probe.json"
 
       - name: Run required patch contract
         id: patch
@@ -166,3 +167,14 @@ jobs:
           console.log(`required failures: ${failures.length}`);
           if (failures.length > 0) process.exitCode = 1;
           NODE
+
+      - name: Upload sanitized diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-1155-sanitized-diagnostics
+          path: |
+            ${{ runner.temp }}/probe.json
+            ${{ runner.temp }}/patch-report.json
+          if-no-files-found: error
+          retention-days: 1
