@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/inspect-1155-current-upstream
+  pull_request:
+    branches:
+      - ci/issue-1155-base
 
 permissions:
   contents: read
