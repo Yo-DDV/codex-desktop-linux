@@ -1,0 +1,80 @@
+name: Inspect upstream patch drift 1155 on Fedora
+
+on:
+  pull_request:
+    branches:
+      - ci/issue-1155-base
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-fedora:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact wrapper source
+        uses: actions/checkout@v4
+
+      - name: Download and verify current upstream DMG
+        env:
+          UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
+          UPSTREAM_DMG_SHA256: ae864e2def7db56d0bb77a876a5cbe4e4c2f554ccc654cec921b946892583c0a
+        run: |
+          curl --fail --location --retry 3 --retry-delay 2 \
+            --output "$RUNNER_TEMP/ChatGPT.dmg" "$UPSTREAM_DMG_URL"
+          printf '%s  %s\n' "$UPSTREAM_DMG_SHA256" "$RUNNER_TEMP/ChatGPT.dmg" | sha256sum --check --strict
+
+      - name: Patch exact artifact inside Fedora 44
+        run: |
+          docker run --rm \
+            -e HOME=/tmp/home \
+            -e XDG_CURRENT_DESKTOP=KDE \
+            -e XDG_SESSION_TYPE=wayland \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP:/work" \
+            fedora:44 bash -lc '
+              set -euo pipefail
+              dnf -y install nodejs npm p7zip p7zip-plugins findutils coreutils >/dev/null
+              mkdir -p /tmp/home /work/fedora-dmg /work/fedora-app
+              set +e
+              7z x -y -snl -o/work/fedora-dmg /work/ChatGPT.dmg >/work/fedora-7z.log 2>&1
+              seven_zip_status=$?
+              set -e
+              app_dir="$(find /work/fedora-dmg -maxdepth 3 -name "*.app" -type d -print -quit)"
+              if [ -z "$app_dir" ]; then
+                cat /work/fedora-7z.log >&2
+                exit 1
+              fi
+              if [ "$seven_zip_status" -ne 0 ]; then
+                echo "7z exited with code $seven_zip_status after extracting the app bundle; continuing as the project extractor does."
+                tail -n 8 /work/fedora-7z.log || true
+              fi
+              npx --yes asar extract "$app_dir/Contents/Resources/app.asar" /work/fedora-app
+              node /repo/scripts/patch-linux-window-ui.js \
+                --report-json /work/fedora-patch-report.json \
+                --enforce-critical \
+                /work/fedora-app
+              node - /work/fedora-patch-report.json <<"NODE"
+              const fs = require("node:fs");
+              const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+              const selected = new Set([
+                "linux-explicit-tray-quit",
+                "main-process-ui",
+                "linux-fast-mode-model-guard",
+                "subagent-nickname-metadata-shape",
+              ]);
+              for (const entry of report.patches.filter((patch) => selected.has(patch.name))) {
+                console.log(`${entry.name}: ${entry.status}${entry.reason ? ` (${entry.reason})` : ""}`);
+              }
+              NODE
+            '
+
+      - name: Upload Fedora patch report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-1155-fedora-patch-report
+          path: ${{ runner.temp }}/fedora-patch-report.json
+          if-no-files-found: error
+          retention-days: 1
