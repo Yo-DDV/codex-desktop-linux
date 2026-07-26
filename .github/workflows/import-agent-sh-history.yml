@@ -18,6 +18,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git push \
-            "https://x-access-token:${GH_TOKEN}@github.com/Yo-DDV/codex-desktop-linux.git" \
-            --delete automation/import-agent-sh-history
+          git init
+          git remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/Yo-DDV/codex-desktop-linux.git"
+          git push origin --delete automation/import-agent-sh-history
