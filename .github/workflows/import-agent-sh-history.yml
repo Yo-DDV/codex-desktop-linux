@@ -1,0 +1,25 @@
+name: Import agent-sh history for cross-repository PR validation
+
+on:
+  push:
+    branches:
+      - automation/import-agent-sh-history
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Import standalone history into a temporary head branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/agent-sh/computer-use-linux.git standalone
+          cd standalone
+          git push \
+            "https://x-access-token:${GH_TOKEN}@github.com/Yo-DDV/codex-desktop-linux.git" \
+            HEAD:refs/heads/sync/agent-sh-crossrepo
