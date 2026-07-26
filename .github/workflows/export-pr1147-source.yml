@@ -1,0 +1,29 @@
+name: Export PR 1147 source
+
+on:
+  pull_request:
+    branches:
+      - validation/pr1147-base
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Archive checked-out source
+        run: |
+          git status --short
+          tar --exclude=.git -czf "$RUNNER_TEMP/pr1147-source.tar.gz" .
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr1147-source
+          path: ${{ runner.temp }}/pr1147-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
