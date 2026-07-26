@@ -3,6 +3,82 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MUTATION_DETECTED_EXIT=86
+PIDFD_UNAVAILABLE_EXIT=77
+
+pidfd_cleanup_probe() {
+    python3 - "$PIDFD_UNAVAILABLE_EXIT" <<'PY'
+import errno
+import os
+import select
+import signal
+import sys
+
+skip_status = int(sys.argv[1])
+unavailable_errnos = {errno.EACCES, errno.EINVAL, errno.ENOSYS, errno.EPERM}
+
+if (
+    not hasattr(os, "pidfd_open")
+    or not hasattr(signal, "pidfd_send_signal")
+    or not hasattr(select, "poll")
+):
+    raise SystemExit(skip_status)
+
+try:
+    with open("/proc/self/cmdline", "rb") as cmdline:
+        if not cmdline.read():
+            raise SystemExit(skip_status)
+except OSError as error:
+    if error.errno in {errno.EACCES, errno.ENOENT, errno.EPERM}:
+        raise SystemExit(skip_status)
+    print(f"process identity capability probe failed: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    pidfd = os.pidfd_open(os.getpid(), 0)
+except (TypeError, NotImplementedError):
+    raise SystemExit(skip_status)
+except OSError as error:
+    if error.errno in unavailable_errnos:
+        raise SystemExit(skip_status)
+    print(f"pidfd capability probe failed: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    try:
+        signal.pidfd_send_signal(pidfd, 0)
+    except (TypeError, NotImplementedError):
+        raise SystemExit(skip_status)
+    except OSError as error:
+        if error.errno in unavailable_errnos:
+            raise SystemExit(skip_status)
+        print(f"pidfd signal probe failed: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    if poller.poll(0):
+        print("pidfd poll capability probe reported an exited live process", file=sys.stderr)
+        raise SystemExit(1)
+finally:
+    os.close(pidfd)
+PY
+}
+
+set +e
+pidfd_cleanup_probe
+pidfd_probe_status=$?
+set -e
+if [ "$pidfd_probe_status" -eq "$PIDFD_UNAVAILABLE_EXIT" ]; then
+    printf '%s\n' '{"outcome":"skipped","reason":"pidfd-cleanup-unavailable"}'
+    printf '%s\n' 'launcher window-reopen behavior test skipped: pidfd cleanup unavailable'
+    exit "$PIDFD_UNAVAILABLE_EXIT"
+fi
+if [ "$pidfd_probe_status" -ne 0 ]; then
+    printf '%s\n' 'launcher window-reopen behavior test failed: pidfd capability probe failed' >&2
+    exit 1
+fi
+
 TMP_DIR="$(mktemp -d)"
 APP_DIR="$TMP_DIR/app"
 HOME_DIR="$TMP_DIR/home"
@@ -10,7 +86,7 @@ RUNTIME_DIR="$TMP_DIR/runtime"
 STATE_DIR="$HOME_DIR/.local/state/codex-desktop"
 SOCKET_PATH="$RUNTIME_DIR/codex-desktop/launch-action.sock"
 HANDOFF_RESULT="$TMP_DIR/handoff.json"
-WINDOW_STATE="$TMP_DIR/window-state"
+MUTATION_MARKER="$TMP_DIR/resident-replacement-mutation"
 FIRST_LOG="$TMP_DIR/first-launch.log"
 SECOND_LOG="$TMP_DIR/second-launch.log"
 APP_LOG="$HOME_DIR/.cache/codex-desktop/launcher.log"
@@ -50,13 +126,12 @@ record_result() {
     marker_pid="$(cat "$STATE_DIR/app.pid" 2>/dev/null || true)"
     main_process_count="$(count_test_main_processes)"
 
-    printf '{"outcome":"%s","initialPid":"%s","finalPid":"%s","mainProcessCount":%s,"handoff":"%s","windowState":"%s","markerPid":"%s","webviewMarkerPresent":%s,"socketPresent":%s,"timedOut":%s,"userVisibleError":%s}\n' \
+    printf '{"outcome":"%s","initialPid":"%s","finalPid":"%s","mainProcessCount":%s,"handoff":"%s","markerPid":"%s","webviewMarkerPresent":%s,"socketPresent":%s,"timedOut":%s,"userVisibleError":%s}\n' \
         "$outcome" \
         "$FIRST_ELECTRON_PID" \
         "$FINAL_ELECTRON_PID" \
         "$main_process_count" \
         "$HANDOFF_STATUS" \
-        "$(cat "$WINDOW_STATE" 2>/dev/null || printf unknown)" \
         "$marker_pid" \
         "$([ -s "$STATE_DIR/webview.pid" ] && printf true || printf false)" \
         "$([ -S "$SOCKET_PATH" ] && printf true || printf false)" \
@@ -70,7 +145,7 @@ stop_owned_process_bounded() {
     local expected="$3"
 
     [[ "$pid" =~ ^[0-9]+$ ]] || return 0
-    python3 - "$pid" "$match_mode" "$expected" <<'PY' || true
+    python3 - "$pid" "$match_mode" "$expected" <<'PY'
 import os
 import select
 import signal
@@ -81,15 +156,21 @@ match_mode = sys.argv[2]
 expected = sys.argv[3]
 
 try:
-    pidfd = os.pidfd_open(pid)
-except (ProcessLookupError, PermissionError):
+    pidfd = os.pidfd_open(pid, 0)
+except ProcessLookupError:
     raise SystemExit(0)
+except OSError as error:
+    print(f"failed to open pidfd for {pid}: {error}", file=sys.stderr)
+    raise SystemExit(1)
 
 try:
     try:
         raw_cmdline = open(f"/proc/{pid}/cmdline", "rb").read()
-    except (FileNotFoundError, PermissionError):
+    except FileNotFoundError:
         raise SystemExit(0)
+    except OSError as error:
+        print(f"failed to read process identity for {pid}: {error}", file=sys.stderr)
+        raise SystemExit(1)
     argv = [part.decode(errors="surrogateescape") for part in raw_cmdline.split(b"\0") if part]
     matches = bool(argv) and (
         (match_mode == "arg0" and argv[0] == expected)
@@ -98,28 +179,40 @@ try:
     if not matches:
         raise SystemExit(0)
 
-    signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+    except ProcessLookupError:
+        raise SystemExit(0)
     poller = select.poll()
     poller.register(pidfd, select.POLLIN)
     if not poller.poll(1000):
-        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
-        poller.poll(1000)
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        except ProcessLookupError:
+            raise SystemExit(0)
+        if not poller.poll(1000):
+            print(f"process {pid} did not exit after bounded TERM/KILL", file=sys.stderr)
+            raise SystemExit(1)
 finally:
     os.close(pidfd)
 PY
 }
 
 cleanup() {
+    local original_status=$?
+    local cleanup_failed=0
     local cmdline
     local pid
     local webview_pid
 
+    trap - EXIT
+    set +e
     webview_pid="$(cat "$STATE_DIR/webview.pid" 2>/dev/null || true)"
-    stop_owned_process_bounded "$LAUNCHER_PID" argv "$APP_DIR/start.sh"
-    stop_owned_process_bounded "$SECOND_LAUNCHER_PID" argv "$APP_DIR/start.sh"
-    stop_owned_process_bounded "$SOCKET_PID" argv "$SOCKET_PATH"
-    stop_owned_process_bounded "$webview_pid" argv "$APP_DIR/.codex-linux/webview-server.py"
-    stop_owned_process_bounded "$DECOY_PID" arg0 "$TMP_DIR/decoy-electron"
+    stop_owned_process_bounded "$LAUNCHER_PID" argv "$APP_DIR/start.sh" || cleanup_failed=1
+    stop_owned_process_bounded "$SECOND_LAUNCHER_PID" argv "$APP_DIR/start.sh" || cleanup_failed=1
+    stop_owned_process_bounded "$SOCKET_PID" argv "$SOCKET_PATH" || cleanup_failed=1
+    stop_owned_process_bounded "$webview_pid" argv "$APP_DIR/.codex-linux/webview-server.py" || cleanup_failed=1
+    stop_owned_process_bounded "$DECOY_PID" arg0 "$TMP_DIR/decoy-electron" || cleanup_failed=1
     for cmdline in /proc/[0-9]*/cmdline; do
         [ -r "$cmdline" ] || continue
         pid="${cmdline#/proc/}"
@@ -128,13 +221,24 @@ cleanup() {
         if [ "${arg0:-}" = "$APP_DIR/electron" ]; then
             IFS= read -r -d '' revalidated_arg0 < "$cmdline" 2>/dev/null || true
             if [ "${revalidated_arg0:-}" = "$APP_DIR/electron" ]; then
-                stop_owned_process_bounded "$pid" arg0 "$APP_DIR/electron"
+                stop_owned_process_bounded "$pid" arg0 "$APP_DIR/electron" || cleanup_failed=1
             fi
         fi
         arg0=""
         revalidated_arg0=""
     done
-    rm -rf "$TMP_DIR"
+
+    if [ "$cleanup_failed" -ne 0 ]; then
+        printf '%s\n' 'launcher window-reopen behavior cleanup failed' >&2
+        printf 'launcher window-reopen behavior workspace retained: %s\n' "$TMP_DIR" >&2
+        exit 1
+    fi
+    rm -rf "$TMP_DIR" || {
+        printf 'launcher window-reopen behavior cleanup failed to remove workspace: %s\n' \
+            "$TMP_DIR" >&2
+        exit 1
+    }
+    exit "$original_status"
 }
 trap cleanup EXIT
 
@@ -152,6 +256,13 @@ fail() {
     printf '%s\n' '--- app launcher log ---' >&2
     sed -n '1,300p' "$APP_LOG" >&2 2>/dev/null || true
     exit 1
+}
+
+mutation_detected() {
+    FINAL_ELECTRON_PID="$(read_live_app_pid 2>/dev/null || true)"
+    printf '%s\n' 'launcher window-reopen behavior mutation detected: healthy resident replacement' >&2
+    record_result "resident-replacement-detected" >&2
+    exit "$MUTATION_DETECTED_EXIT"
 }
 
 wait_for() {
@@ -184,6 +295,11 @@ handoff_was_recorded() {
     [ -s "$HANDOFF_RESULT" ]
 }
 
+mutation_was_applied() {
+    [ -s "$MUTATION_MARKER" ] || return 1
+    [ "$(cat "$MUTATION_MARKER" 2>/dev/null || true)" = "$FIRST_ELECTRON_PID" ]
+}
+
 launcher_lock_is_available() {
     flock -n "$STATE_DIR/launcher.lock" true
 }
@@ -213,7 +329,6 @@ mkdir -p \
 
 printf '%s\n' '{"codex-linux-warm-start-enabled":true}' \
     > "$HOME_DIR/.config/codex-desktop/settings.json"
-printf '%s\n' "visible-unfocused" > "$WINDOW_STATE"
 
 PORT="$(python3 - <<'PY'
 import socket
@@ -244,6 +359,7 @@ mutation = r'''
 prepare_launch_state_under_lock
 if running_app_is_active; then
     controlled_resident_pid="$RUNNING_APP_PID"
+    printf '%s\n' "$controlled_resident_pid" > "$CODEX_TEST_MUTATION_MARKER"
     kill "$controlled_resident_pid"
     for _ in $(seq 1 100); do
         kill -0 "$controlled_resident_pid" 2>/dev/null || break
@@ -289,6 +405,7 @@ COMMON_ENV=(
     "XDG_RUNTIME_DIR=$RUNTIME_DIR"
     "CODEX_CLI_PATH=$(command -v true)"
     "CODEX_WEBVIEW_PORT=$PORT"
+    "CODEX_TEST_MUTATION_MARKER=$MUTATION_MARKER"
 )
 
 "${COMMON_ENV[@]}" "$APP_DIR/start.sh" > "$FIRST_LOG" 2>&1 &
@@ -297,13 +414,13 @@ wait_for "first Electron marker" pid_file_is_live
 wait_for "first launcher lock release" launcher_lock_is_available
 FIRST_ELECTRON_PID="$(read_live_app_pid)"
 
-python3 - "$SOCKET_PATH" "$HANDOFF_RESULT" "$WINDOW_STATE" <<'PY' &
+python3 - "$SOCKET_PATH" "$HANDOFF_RESULT" <<'PY' &
 import json
 import os
 import socket
 import sys
 
-socket_path, result_path, window_state_path = sys.argv[1:]
+socket_path, result_path = sys.argv[1:]
 os.makedirs(os.path.dirname(socket_path), exist_ok=True)
 try:
     os.unlink(socket_path)
@@ -319,8 +436,6 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         client.settimeout(2)
         payload = client.recv(65536)
         request = json.loads(payload.decode("utf-8").strip())
-        with open(window_state_path, "w", encoding="utf-8") as window_state:
-            window_state.write("visible-focused\n")
         with open(result_path, "w", encoding="utf-8") as result:
             json.dump({"argv": request.get("argv", []), "status": "acknowledged"}, result)
         client.sendall(b"ok\n")
@@ -333,9 +448,9 @@ if [ "${CODEX_TEST_FORCE_RESIDENT_REPLACEMENT:-0}" = "1" ]; then
         > "$HOME_DIR/.config/codex-desktop/settings.json"
     "${COMMON_ENV[@]}" "$APP_DIR/start.sh" --new-chat > "$SECOND_LOG" 2>&1 &
     SECOND_LAUNCHER_PID=$!
+    wait_for "controlled resident-replacement mutation" mutation_was_applied
     wait_for "unconditional resident replacement regression" resident_policy_regressed
-    FINAL_ELECTRON_PID="$(read_live_app_pid 2>/dev/null || true)"
-    fail "warm-start-disabled launch replaced or duplicated a healthy resident"
+    mutation_detected
 fi
 
 set +e
@@ -361,8 +476,6 @@ kill -0 "$FIRST_ELECTRON_PID" 2>/dev/null \
     || fail "runtime marker no longer identifies the healthy resident"
 [ "$HANDOFF_STATUS" = "acknowledged" ] \
     || fail "controlled resident did not acknowledge the reopen handoff"
-[ "$(cat "$WINDOW_STATE")" = "visible-focused" ] \
-    || fail "controlled primary window did not become visible and focused"
 python3 - "$HANDOFF_RESULT" <<'PY' \
     || fail "reopen handoff did not preserve the --new-chat argument"
 import json
