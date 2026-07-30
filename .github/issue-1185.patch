@@ -1,0 +1,84 @@
+diff --git a/scripts/patches/impl/avatar-overlay.js b/scripts/patches/impl/avatar-overlay.js
+index 0960848..0000000 100644
+--- a/scripts/patches/impl/avatar-overlay.js
++++ b/scripts/patches/impl/avatar-overlay.js
+@@ -7,6 +7,10 @@ const {
+ } = require("../lib/minified-js.js");
+ const { recordStrategy } = require("../strategy-telemetry.js");
+ 
++// Electron's X11 shape clips pixels outside its native region. Keep the input
++// surface tight while allowing the current voice orb to paint its top edge.
++const AVATAR_MASCOT_TOP_RENDER_BLEED_PX = 4;
++
+ function findAvatarMethodAfter(source, signatureRegex, startIndex, endIndex = source.length) {
+   const match = source.slice(startIndex, endIndex).match(signatureRegex);
+   if (match == null) {
+@@ -82,7 +86,7 @@ function avatarCursorRegionPatch(electronVar) {
+ }
+ 
+ function avatarInputShapePatch() {
+-  return "codexLinuxShouldUseWholeWindowInput(){return this.codexLinuxWholeWindowInput===!0}codexLinuxBuildAvatarInputShape(e){let t=this.layout;if(t==null)return null;let r;try{r=e.getContentBounds()}catch{return null}if(r==null||!Number.isFinite(r.width)||!Number.isFinite(r.height))return null;if(this.dragState!=null||this.codexLinuxShouldUseWholeWindowInput())return[{x:0,y:0,width:r.width,height:r.height}];let i=e=>{if(e==null)return null;let t=Math.max(0,e.left),n=Math.max(0,e.top),i=Math.min(r.width,e.left+e.width)-t,a=Math.min(r.height,e.top+e.height)-n;return i<=0||a<=0?null:{x:t,y:n,width:i,height:a}};return[i(t.mascot),i(t.tray)].filter(Boolean)}";
++  return `codexLinuxShouldUseWholeWindowInput(){return this.codexLinuxWholeWindowInput===!0}codexLinuxBuildAvatarInputShape(e){let t=this.layout;if(t==null)return null;let r;try{r=e.getContentBounds()}catch{return null}if(r==null||!Number.isFinite(r.width)||!Number.isFinite(r.height))return null;if(this.dragState!=null||this.codexLinuxShouldUseWholeWindowInput())return[{x:0,y:0,width:r.width,height:r.height}];let i=(e,t=0)=>{if(e==null)return null;let n=Math.max(0,e.left),i=Math.max(0,e.top-t),a=Math.min(r.width,e.left+e.width)-n,o=Math.min(r.height,e.top+e.height)-i;return a<=0||o<=0?null:{x:n,y:i,width:a,height:o}};return[i(t.mascot,${AVATAR_MASCOT_TOP_RENDER_BLEED_PX}),i(t.tray)].filter(Boolean)}`;
+ }
+ 
+ function avatarApplyInputShapePatch() {
+diff --git a/scripts/patch-linux-window-ui.test.js b/scripts/patch-linux-window-ui.test.js
+index 6ad4cab..0000000 100755
+--- a/scripts/patch-linux-window-ui.test.js
++++ b/scripts/patch-linux-window-ui.test.js
+@@ -3904,7 +3904,7 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
+   assert.match(patched, /try\{let t=this\.codexLinuxBuildAvatarInputShape\(e\);if\(t==null\)return!1;let n=JSON\.stringify\(t\)/);
+   assert.match(patched, /e\.setShape\(t\),this\.codexLinuxAvatarInputShapeKey=n;return!0/);
+-  assert.match(patched, /return\[i\(t\.mascot\),i\(t\.tray\)\]\.filter\(Boolean\)/);
++  assert.match(patched, /return\[i\(t\.mascot,4\),i\(t\.tray\)\]\.filter\(Boolean\)/);
+   assert.match(patched, /process\.platform!==`linux`/);
+   assert.match(patched, /setInterval\(\(\)=>\{let e=this\.window/);
+   assert.match(patched, /\},32\)/);
+@@ -4050,7 +4050,7 @@ test("locked pet overlay keeps only mascot and tray interactive on X11 and Wayl
+   controller.codexPetOverlaySyncWindow(window);
+   assert.equal(controller.codexLinuxWholeWindowInput, false);
+   assert.deepEqual(JSON.parse(JSON.stringify(controller.codexLinuxBuildAvatarInputShape(window))), [
+-    { x: 220, y: 190, width: 113, height: 122 },
++    { x: 220, y: 186, width: 113, height: 126 },
+     { x: 57, y: 55, width: 276, height: 131 },
+   ]);
+ 
+@@ -4133,6 +4133,14 @@ test("Linux avatar overlay interactivity is bounded to avatar regions", () => {
+       getContentBounds: () => ({ x: 5743, y: 936, width: 356, height: 320 }),
+     }),
+     false,
+   );
++  cursor.x = 5973;
++  cursor.y = 1124;
++  assert.equal(
++    controller.codexLinuxIsCursorInAvatarInteractiveRegion({
++      getContentBounds: () => ({ x: 5743, y: 936, width: 356, height: 320 }),
++    }),
++    false,
++  );
+   assert.equal(
+     controller.codexLinuxIsCursorInAvatarInteractiveRegion({
+       getContentBounds: () => ({ x: 6000, y: 936, width: 100, height: 100 }),
+@@ -4151,12 +4159,24 @@ test("Linux avatar overlay interactivity is bounded to avatar regions", () => {
+   };
+   const serializeShape = (shape) => JSON.parse(JSON.stringify(shape));
+   assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
+-    { x: 220, y: 190, width: 113, height: 122 },
++    { x: 220, y: 186, width: 113, height: 126 },
+     { x: 57, y: 55, width: 276, height: 131 },
+   ]);
+   controller.pointerInteractive = true;
+   assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
+-    { x: 220, y: 190, width: 113, height: 122 },
++    { x: 220, y: 186, width: 113, height: 126 },
++    { x: 57, y: 55, width: 276, height: 131 },
++  ]);
++  controller.layout.mascot = { left: 220, top: 2, width: 113, height: 122 };
++  assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
++    { x: 220, y: 0, width: 113, height: 124 },
+     { x: 57, y: 55, width: 276, height: 131 },
+   ]);
++  controller.layout.mascot = { left: 220, top: 190, width: 113, height: 122 };
+   controller.dragState = {};
+   assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
+     { x: 0, y: 0, width: 356, height: 320 },
