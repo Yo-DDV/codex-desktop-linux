@@ -26,7 +26,7 @@ diff --git a/scripts/patch-linux-window-ui.test.js b/scripts/patch-linux-window-
 index 6ad4cab..0000000 100755
 --- a/scripts/patch-linux-window-ui.test.js
 +++ b/scripts/patch-linux-window-ui.test.js
-@@ -3904,7 +3904,7 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
+@@ -3904,6 +3904,6 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
    assert.match(patched, /try\{let t=this\.codexLinuxBuildAvatarInputShape\(e\);if\(t==null\)return!1;let n=JSON\.stringify\(t\)/);
    assert.match(patched, /e\.setShape\(t\),this\.codexLinuxAvatarInputShapeKey=n;return!0/);
 -  assert.match(patched, /return\[i\(t\.mascot\),i\(t\.tray\)\]\.filter\(Boolean\)/);
@@ -43,7 +43,7 @@ index 6ad4cab..0000000 100755
      { x: 57, y: 55, width: 276, height: 131 },
    ]);
  
-@@ -4133,6 +4133,14 @@ test("Linux avatar overlay interactivity is bounded to avatar regions", () => {
+@@ -4133,7 +4133,15 @@ test("Linux avatar overlay interactivity is bounded to avatar regions", () => {
        getContentBounds: () => ({ x: 5743, y: 936, width: 356, height: 320 }),
      }),
      false,
@@ -59,7 +59,7 @@ index 6ad4cab..0000000 100755
    assert.equal(
      controller.codexLinuxIsCursorInAvatarInteractiveRegion({
        getContentBounds: () => ({ x: 6000, y: 936, width: 100, height: 100 }),
-@@ -4151,12 +4159,24 @@ test("Linux avatar overlay interactivity is bounded to avatar regions", () => {
+@@ -4151,14 +4159,20 @@ test("Linux avatar overlay interactivity is bounded to avatar regions", () => {
    };
    const serializeShape = (shape) => JSON.parse(JSON.stringify(shape));
    assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
