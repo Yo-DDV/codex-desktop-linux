@@ -3904,7 +3904,7 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
   assert.match(patched, /if\(t==null\)return null/);
   assert.match(patched, /try\{let t=this\.codexLinuxBuildAvatarInputShape\(e\);if\(t==null\)return!1;let n=JSON\.stringify\(t\)/);
   assert.match(patched, /e\.setShape\(t\),this\.codexLinuxAvatarInputShapeKey=n;return!0/);
-  assert.match(patched, /return\[i\(t\.mascot\),i\(t\.tray\)\]\.filter\(Boolean\)/);
+  assert.match(patched, /return\[i\(t\.mascot,4\),i\(t\.tray\)\]\.filter\(Boolean\)/);
   assert.match(patched, /process\.platform!==`linux`/);
   assert.match(patched, /setInterval\(\(\)=>\{let e=this\.window/);
   assert.match(patched, /\},32\)/);
@@ -4050,7 +4050,7 @@ test("locked pet overlay keeps only mascot and tray interactive on X11 and Wayla
   controller.codexPetOverlaySyncWindow(window);
   assert.equal(controller.codexLinuxWholeWindowInput, false);
   assert.deepEqual(JSON.parse(JSON.stringify(controller.codexLinuxBuildAvatarInputShape(window))), [
-    { x: 220, y: 190, width: 113, height: 122 },
+    { x: 220, y: 186, width: 113, height: 126 },
     { x: 57, y: 55, width: 276, height: 131 },
   ]);
 
@@ -4138,6 +4138,14 @@ test("Linux avatar overlay interactivity is bounded to avatar regions", () => {
     }),
     false,
   );
+  cursor.x = 5973;
+  cursor.y = 1124;
+  assert.equal(
+    controller.codexLinuxIsCursorInAvatarInteractiveRegion({
+      getContentBounds: () => ({ x: 5743, y: 936, width: 356, height: 320 }),
+    }),
+    false,
+  );
   assert.equal(
     controller.codexLinuxIsCursorInAvatarInteractiveRegion({
       getContentBounds: () => ({ x: 6000, y: 936, width: 100, height: 100 }),
@@ -4152,14 +4160,20 @@ test("Linux avatar overlay interactivity is bounded to avatar regions", () => {
   };
   const serializeShape = (shape) => JSON.parse(JSON.stringify(shape));
   assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
-    { x: 220, y: 190, width: 113, height: 122 },
+    { x: 220, y: 186, width: 113, height: 126 },
     { x: 57, y: 55, width: 276, height: 131 },
   ]);
   controller.pointerInteractive = true;
   assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
-    { x: 220, y: 190, width: 113, height: 122 },
+    { x: 220, y: 186, width: 113, height: 126 },
     { x: 57, y: 55, width: 276, height: 131 },
   ]);
+  controller.layout.mascot = { left: 220, top: 2, width: 113, height: 122 };
+  assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
+    { x: 220, y: 0, width: 113, height: 124 },
+    { x: 57, y: 55, width: 276, height: 131 },
+  ]);
+  controller.layout.mascot = { left: 220, top: 190, width: 113, height: 122 };
   controller.dragState = {};
   assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
     { x: 0, y: 0, width: 356, height: 320 },
