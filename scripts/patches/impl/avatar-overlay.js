@@ -6,6 +6,10 @@ const {
 } = require("../lib/minified-js.js");
 const { recordStrategy } = require("../strategy-telemetry.js");
 
+// Electron's X11 shape clips pixels outside its native region. Keep the input
+// surface tight while allowing the current voice orb to paint its top edge.
+const AVATAR_MASCOT_TOP_RENDER_BLEED_PX = 4;
+
 function findAvatarMethodAfter(source, signatureRegex, startIndex, endIndex = source.length) {
   const match = source.slice(startIndex, endIndex).match(signatureRegex);
   if (match == null) {
@@ -81,7 +85,7 @@ function avatarCursorRegionPatch(electronVar) {
 }
 
 function avatarInputShapePatch() {
-  return "codexLinuxShouldUseWholeWindowInput(){return this.codexLinuxWholeWindowInput===!0}codexLinuxBuildAvatarInputShape(e){let t=this.layout;if(t==null)return null;let r;try{r=e.getContentBounds()}catch{return null}if(r==null||!Number.isFinite(r.width)||!Number.isFinite(r.height))return null;if(this.dragState!=null||this.codexLinuxShouldUseWholeWindowInput())return[{x:0,y:0,width:r.width,height:r.height}];let i=e=>{if(e==null)return null;let t=Math.max(0,e.left),n=Math.max(0,e.top),i=Math.min(r.width,e.left+e.width)-t,a=Math.min(r.height,e.top+e.height)-n;return i<=0||a<=0?null:{x:t,y:n,width:i,height:a}};return[i(t.mascot),i(t.tray)].filter(Boolean)}";
+  return `codexLinuxShouldUseWholeWindowInput(){return this.codexLinuxWholeWindowInput===!0}codexLinuxBuildAvatarInputShape(e){let t=this.layout;if(t==null)return null;let r;try{r=e.getContentBounds()}catch{return null}if(r==null||!Number.isFinite(r.width)||!Number.isFinite(r.height))return null;if(this.dragState!=null||this.codexLinuxShouldUseWholeWindowInput())return[{x:0,y:0,width:r.width,height:r.height}];let i=(e,t=0)=>{if(e==null)return null;let n=Math.max(0,e.left),i=Math.max(0,e.top-t),a=Math.min(r.width,e.left+e.width)-n,o=Math.min(r.height,e.top+e.height)-i;return a<=0||o<=0?null:{x:n,y:i,width:a,height:o}};return[i(t.mascot,${AVATAR_MASCOT_TOP_RENDER_BLEED_PX}),i(t.tray)].filter(Boolean)}`;
 }
 
 function avatarApplyInputShapePatch() {
